@@ -4,7 +4,6 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using System.Windows.Input;
-using WindowsPCCleaner.Commands;
 using WindowsPCCleaner.Models;
 using WindowsPCCleaner.Services;
 
@@ -12,320 +11,187 @@ namespace WindowsPCCleaner.ViewModels
 {
     public class DashboardViewModel : INotifyPropertyChanged
     {
-        private readonly ICleaningService _cleaningService;
-        private readonly IDiskAnalysisService _diskAnalysisService;
+        private readonly ISystemCleaningService _systemCleaningService;
         private readonly ILoggingService _loggingService;
 
-        private SystemHealthScore _healthScore;
-        private ObservableCollection<QuickStat> _quickStats;
-        private ObservableCollection<RecentActivity> _recentActivities;
-        private bool _isLoading;
+        private int _systemHealthScore = 85;
+        private long _totalJunkSize;
+        private int _totalJunkFiles;
+        private string _lastScanTime = "Never";
+        private ObservableCollection<QuickActionItem> _quickActions;
+        private ObservableCollection<SystemAlert> _systemAlerts;
 
-        public DashboardViewModel(
-            ICleaningService cleaningService,
-            IDiskAnalysisService diskAnalysisService,
-            ILoggingService loggingService)
+        public DashboardViewModel(ISystemCleaningService systemCleaningService, ILoggingService loggingService)
         {
-            _cleaningService = cleaningService;
-            _diskAnalysisService = diskAnalysisService;
+            _systemCleaningService = systemCleaningService;
             _loggingService = loggingService;
 
-            QuickStats = new ObservableCollection<QuickStat>();
-            RecentActivities = new ObservableCollection<RecentActivity>();
-
-            // Commands
-            QuickScanCommand = new AsyncRelayCommand(ExecuteQuickScanAsync);
-            RefreshCommand = new AsyncRelayCommand(RefreshDashboardAsync);
-
-            // Initialize dashboard
-            _ = InitializeDashboardAsync();
+            InitializeQuickActions();
+            InitializeSystemAlerts();
+            LoadDashboardDataAsync();
         }
 
-        public SystemHealthScore HealthScore
+        public int SystemHealthScore
         {
-            get => _healthScore;
-            set => SetProperty(ref _healthScore, value);
+            get => _systemHealthScore;
+            set => SetProperty(ref _systemHealthScore, value);
         }
 
-        public ObservableCollection<QuickStat> QuickStats
+        public long TotalJunkSize
         {
-            get => _quickStats;
-            set => SetProperty(ref _quickStats, value);
+            get => _totalJunkSize;
+            set => SetProperty(ref _totalJunkSize, value);
         }
 
-        public ObservableCollection<RecentActivity> RecentActivities
+        public int TotalJunkFiles
         {
-            get => _recentActivities;
-            set => SetProperty(ref _recentActivities, value);
+            get => _totalJunkFiles;
+            set => SetProperty(ref _totalJunkFiles, value);
         }
 
-        public bool IsLoading
+        public string LastScanTime
         {
-            get => _isLoading;
-            set => SetProperty(ref _isLoading, value);
+            get => _lastScanTime;
+            set => SetProperty(ref _lastScanTime, value);
         }
 
-        public ICommand QuickScanCommand { get; }
-        public ICommand RefreshCommand { get; }
-
-        private async Task InitializeDashboardAsync()
+        public ObservableCollection<QuickActionItem> QuickActions
         {
-            IsLoading = true;
-            try
+            get => _quickActions;
+            set => SetProperty(ref _quickActions, value);
+        }
+
+        public ObservableCollection<SystemAlert> SystemAlerts
+        {
+            get => _systemAlerts;
+            set => SetProperty(ref _systemAlerts, value);
+        }
+
+        private void InitializeQuickActions()
+        {
+            QuickActions = new ObservableCollection<QuickActionItem>
             {
-                await LoadSystemHealthAsync();
-                await LoadQuickStatsAsync();
-                await LoadRecentActivitiesAsync();
-            }
-            catch (Exception ex)
-            {
-                _loggingService.LogError($"Error initializing dashboard: {ex.Message}", ex);
-            }
-            finally
-            {
-                IsLoading = false;
-            }
-        }
-
-        private async Task LoadSystemHealthAsync()
-        {
-            try
-            {
-                var diskInfo = await _diskAnalysisService.GetDiskInfoAsync();
-                var tempFileCount = await GetTempFileCountAsync();
-                var registryIssues = await GetRegistryIssueCountAsync();
-
-                var score = CalculateHealthScore(diskInfo, tempFileCount, registryIssues);
-                
-                HealthScore = new SystemHealthScore
+                new QuickActionItem
                 {
-                    Score = score,
-                    Status = GetHealthStatus(score),
-                    LastUpdated = DateTime.Now,
-                    Recommendations = GetRecommendations(score, tempFileCount, registryIssues)
-                };
-            }
-            catch (Exception ex)
-            {
-                _loggingService.LogError($"Error loading system health: {ex.Message}", ex);
-            }
-        }
-
-        private async Task LoadQuickStatsAsync()
-        {
-            try
-            {
-                var diskInfo = await _diskAnalysisService.GetDiskInfoAsync();
-                var tempSize = await GetTempFileSizeAsync();
-                var cacheSize = await GetCacheSizeAsync();
-
-                QuickStats.Clear();
-                QuickStats.Add(new QuickStat
+                    Title = "Quick Clean",
+                    Description = "Clean temporary files and cache",
+                    Icon = "🧹",
+                    Command = new AsyncRelayCommand(PerformQuickCleanAsync)
+                },
+                new QuickActionItem
                 {
-                    Title = "Disk Space Used",
-                    Value = $"{FormatBytes(diskInfo.UsedSpace)} / {FormatBytes(diskInfo.TotalSpace)}",
-                    Percentage = (double)diskInfo.UsedSpace / diskInfo.TotalSpace * 100,
+                    Title = "Registry Scan",
+                    Description = "Scan for registry issues",
+                    Icon = "🔧",
+                    Command = new AsyncRelayCommand(PerformRegistryScanAsync)
+                },
+                new QuickActionItem
+                {
+                    Title = "Disk Analysis",
+                    Description = "Analyze disk usage",
                     Icon = "💾",
-                    Color = GetDiskSpaceColor((double)diskInfo.UsedSpace / diskInfo.TotalSpace)
-                });
-
-                QuickStats.Add(new QuickStat
+                    Command = new AsyncRelayCommand(PerformDiskAnalysisAsync)
+                },
+                new QuickActionItem
                 {
-                    Title = "Temporary Files",
-                    Value = FormatBytes(tempSize),
-                    Icon = "🗂️",
-                    Color = "#FF6B6B"
-                });
-
-                QuickStats.Add(new QuickStat
-                {
-                    Title = "Cache Files",
-                    Value = FormatBytes(cacheSize),
-                    Icon = "📦",
-                    Color = "#4ECDC4"
-                });
-
-                QuickStats.Add(new QuickStat
-                {
-                    Title = "System Health",
-                    Value = $"{HealthScore?.Score ?? 0}%",
-                    Icon = "❤️",
-                    Color = GetHealthColor(HealthScore?.Score ?? 0)
-                });
-            }
-            catch (Exception ex)
-            {
-                _loggingService.LogError($"Error loading quick stats: {ex.Message}", ex);
-            }
-        }
-
-        private async Task LoadRecentActivitiesAsync()
-        {
-            try
-            {
-                // Load recent activities from logging service
-                var activities = await _loggingService.GetRecentActivitiesAsync(10);
-                
-                RecentActivities.Clear();
-                foreach (var activity in activities)
-                {
-                    RecentActivities.Add(activity);
+                    Title = "Privacy Scan",
+                    Description = "Scan for privacy risks",
+                    Icon = "🔒",
+                    Command = new AsyncRelayCommand(PerformPrivacyScanAsync)
                 }
-            }
-            catch (Exception ex)
-            {
-                _loggingService.LogError($"Error loading recent activities: {ex.Message}", ex);
-            }
+            };
         }
 
-        private async Task ExecuteQuickScanAsync()
+        private void InitializeSystemAlerts()
+        {
+            SystemAlerts = new ObservableCollection<SystemAlert>();
+        }
+
+        private async void LoadDashboardDataAsync()
         {
             try
             {
-                IsLoading = true;
-                
-                var scanOptions = new ScanOptions
+                await Task.Run(() =>
                 {
-                    ScanTemporaryFiles = true,
-                    ScanSystemCache = true,
-                    ScanLogFiles = false,
-                    ScanRecycleBin = true,
-                    ScanRegistry = false
-                };
+                    // Simulate loading dashboard data
+                    TotalJunkSize = 1024 * 1024 * 150; // 150 MB
+                    TotalJunkFiles = 1250;
+                    LastScanTime = "2 hours ago";
 
-                var progress = new Progress<ScanProgress>(p => 
-                {
-                    // Update progress in UI
+                    // Add some sample alerts
+                    SystemAlerts.Add(new SystemAlert
+                    {
+                        Type = AlertType.Warning,
+                        Title = "Low Disk Space",
+                        Message = "Drive C: is running low on space (15% remaining)",
+                        Timestamp = DateTime.Now.AddHours(-1)
+                    });
+
+                    SystemAlerts.Add(new SystemAlert
+                    {
+                        Type = AlertType.Info,
+                        Title = "Startup Programs",
+                        Message = "12 programs are set to start with Windows",
+                        Timestamp = DateTime.Now.AddHours(-2)
+                    });
                 });
-
-                var result = await _cleaningService.ScanSystemAsync(scanOptions, progress, default);
-                
-                // Navigate to cleaning view with results
-                // This would be handled by the main view model
-                
-                _loggingService.LogInfo($"Quick scan completed. Found {result.ItemCount} items.");
             }
             catch (Exception ex)
             {
-                _loggingService.LogError($"Error during quick scan: {ex.Message}", ex);
-            }
-            finally
-            {
-                IsLoading = false;
+                _loggingService.LogError($"Error loading dashboard data: {ex.Message}", ex);
             }
         }
 
-        private async Task RefreshDashboardAsync()
+        private async Task PerformQuickCleanAsync()
         {
-            await InitializeDashboardAsync();
-        }
-
-        private async Task<int> GetTempFileCountAsync()
-        {
-            // Implementation to count temp files
-            return await Task.FromResult(0);
-        }
-
-        private async Task<int> GetRegistryIssueCountAsync()
-        {
-            // Implementation to count registry issues
-            return await Task.FromResult(0);
-        }
-
-        private async Task<long> GetTempFileSizeAsync()
-        {
-            // Implementation to calculate temp file size
-            return await Task.FromResult(0L);
-        }
-
-        private async Task<long> GetCacheSizeAsync()
-        {
-            // Implementation to calculate cache size
-            return await Task.FromResult(0L);
-        }
-
-        private int CalculateHealthScore(DiskInfo diskInfo, int tempFileCount, int registryIssues)
-        {
-            var score = 100;
-            
-            // Reduce score based on disk usage
-            var diskUsagePercent = (double)diskInfo.UsedSpace / diskInfo.TotalSpace;
-            if (diskUsagePercent > 0.9) score -= 30;
-            else if (diskUsagePercent > 0.8) score -= 20;
-            else if (diskUsagePercent > 0.7) score -= 10;
-
-            // Reduce score based on temp files
-            if (tempFileCount > 1000) score -= 20;
-            else if (tempFileCount > 500) score -= 10;
-
-            // Reduce score based on registry issues
-            if (registryIssues > 100) score -= 15;
-            else if (registryIssues > 50) score -= 10;
-
-            return Math.Max(0, score);
-        }
-
-        private string GetHealthStatus(int score)
-        {
-            return score switch
+            try
             {
-                >= 90 => "Excellent",
-                >= 70 => "Good",
-                >= 50 => "Fair",
-                >= 30 => "Poor",
-                _ => "Critical"
-            };
-        }
-
-        private string[] GetRecommendations(int score, int tempFileCount, int registryIssues)
-        {
-            var recommendations = new List<string>();
-
-            if (score < 70)
-                recommendations.Add("Run a full system scan to improve performance");
-            
-            if (tempFileCount > 500)
-                recommendations.Add("Clean temporary files to free up disk space");
-            
-            if (registryIssues > 50)
-                recommendations.Add("Clean registry entries to optimize system");
-
-            return recommendations.ToArray();
-        }
-
-        private string GetDiskSpaceColor(double percentage)
-        {
-            return percentage switch
-            {
-                > 0.9 => "#FF4757",
-                > 0.8 => "#FFA502",
-                > 0.7 => "#FFD700",
-                _ => "#2ED573"
-            };
-        }
-
-        private string GetHealthColor(int score)
-        {
-            return score switch
-            {
-                >= 90 => "#2ED573",
-                >= 70 => "#FFD700",
-                >= 50 => "#FFA502",
-                _ => "#FF4757"
-            };
-        }
-
-        private string FormatBytes(long bytes)
-        {
-            string[] suffixes = { "B", "KB", "MB", "GB", "TB" };
-            int counter = 0;
-            decimal number = bytes;
-            while (Math.Round(number / 1024) >= 1)
-            {
-                number /= 1024;
-                counter++;
+                _loggingService.LogInfo("Starting quick clean from dashboard");
+                // This would trigger the main quick clean functionality
             }
-            return $"{number:n1} {suffixes[counter]}";
+            catch (Exception ex)
+            {
+                _loggingService.LogError($"Error during quick clean: {ex.Message}", ex);
+            }
+        }
+
+        private async Task PerformRegistryScanAsync()
+        {
+            try
+            {
+                _loggingService.LogInfo("Starting registry scan from dashboard");
+                // This would trigger the registry scan functionality
+            }
+            catch (Exception ex)
+            {
+                _loggingService.LogError($"Error during registry scan: {ex.Message}", ex);
+            }
+        }
+
+        private async Task PerformDiskAnalysisAsync()
+        {
+            try
+            {
+                _loggingService.LogInfo("Starting disk analysis from dashboard");
+                // This would trigger the disk analysis functionality
+            }
+            catch (Exception ex)
+            {
+                _loggingService.LogError($"Error during disk analysis: {ex.Message}", ex);
+            }
+        }
+
+        private async Task PerformPrivacyScanAsync()
+        {
+            try
+            {
+                _loggingService.LogInfo("Starting privacy scan from dashboard");
+                // This would trigger the privacy scan functionality
+            }
+            catch (Exception ex)
+            {
+                _loggingService.LogError($"Error during privacy scan: {ex.Message}", ex);
+            }
         }
 
         public event PropertyChangedEventHandler PropertyChanged;
@@ -342,5 +208,28 @@ namespace WindowsPCCleaner.ViewModels
             OnPropertyChanged(propertyName);
             return true;
         }
+    }
+
+    public class QuickActionItem
+    {
+        public string Title { get; set; }
+        public string Description { get; set; }
+        public string Icon { get; set; }
+        public ICommand Command { get; set; }
+    }
+
+    public class SystemAlert
+    {
+        public AlertType Type { get; set; }
+        public string Title { get; set; }
+        public string Message { get; set; }
+        public DateTime Timestamp { get; set; }
+    }
+
+    public enum AlertType
+    {
+        Info,
+        Warning,
+        Error
     }
 }
